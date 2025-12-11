@@ -1875,6 +1875,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "firmware-bundler"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap 4.5.51",
+ "serde",
+ "subst",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "flash-ctrl-emulator"
 version = "0.1.0"
 dependencies = [
@@ -5598,6 +5609,7 @@ dependencies = [
  "clap-num",
  "crc32fast",
  "elf",
+ "firmware-bundler",
  "mcu-builder",
  "mcu-config-emulator",
  "mcu-config-fpga",

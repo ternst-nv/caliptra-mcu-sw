@@ -19,6 +19,7 @@ members = [
     "emulator/consts",
     "emulator/periph",
     "error",
+    "firmware-bundler",
     "hw/model",
     "hw/model/test-fw",
     "platforms/common",
@@ -182,6 +183,7 @@ flash-ctrl-emulator = { path = "platforms/emulator/runtime/kernel/drivers/flash_
 flash-ctrl-fpga = { path = "platforms/fpga/runtime/drivers/flash_ctrl"}
 flash-driver = { path = "runtime/kernel/drivers/flash" }
 flash-image = { path = "common/flash-image" }
+firmware-bundler = { path = "firmware-bundler" }
 i3c-driver = { path = "runtime/kernel/drivers/i3c" }
 libtockasync = { path = "runtime/userspace/libtockasync" }
 mcu-builder = { path = "builder" }
