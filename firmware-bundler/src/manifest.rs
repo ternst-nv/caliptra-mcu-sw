@@ -34,7 +34,7 @@ impl Manifest {
     ///
     /// This could fail if the size is larger than the ITCM.
     pub fn reserve_itcm(&mut self, size: u64) -> Result<()> {
-        let mem = match &mut self.platform.runtime_memory {
+        let mem: &mut Memory = match &mut self.platform.runtime_memory {
             RuntimeMemory::Sram(s) => s,
             RuntimeMemory::Tcm { itcm, dtcm: _ } => itcm,
         };
@@ -45,6 +45,8 @@ impl Manifest {
                 mem.size
             );
         }
+
+        mem.offset += size;
 
         Ok(())
     }
