@@ -585,7 +585,7 @@ fn content_aware_write(prefix: &str, content: &str, linker_dir: &Path) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::Platform;
+    use crate::manifest::{App, Platform};
     use tempfile::TempDir;
 
     /// Create a platform with configurable memory sizes.
@@ -624,6 +624,14 @@ mod tests {
         Binary::new_for_test(name, exec_size, ram_size, None, 0)
     }
 
+    /// Create an app with specified resource requirements.
+    fn test_app(name: &str, exec_size: u64, ram_size: u64) -> App {
+        App {
+            binary: test_binary(name, exec_size, ram_size),
+            grant_space: None,
+        }
+    }
+
     /// Create a Common args struct pointing to a temp directory.
     fn test_common(temp_dir: &TempDir) -> Common {
         Common::new_for_test(temp_dir.path().to_path_buf())
@@ -643,7 +651,7 @@ mod tests {
         platform: Platform,
         rom: Option<Binary>,
         kernel: Binary,
-        apps: Vec<Binary>,
+        apps: Vec<App>,
     ) -> Manifest {
         Manifest {
             platform,
@@ -699,7 +707,7 @@ mod tests {
             test_platform(0x1000, 0x1000, 0x1000, 0x1000),
             None,
             test_binary("kernel", 0x100, 0x100),
-            vec![test_binary("app1", 0x100, 0x100)],
+            vec![test_app("app1", 0x100, 0x100)],
         );
         let result = generate(&manifest, &test_common(&temp), &test_ld_args());
         assert!(result.is_ok());
@@ -719,9 +727,9 @@ mod tests {
             None,
             test_binary("kernel", 0x100, 0x100),
             vec![
-                test_binary("app1", 0x100, 0x100),
-                test_binary("app2", 0x100, 0x100),
-                test_binary("app3", 0x100, 0x100),
+                test_app("app1", 0x100, 0x100),
+                test_app("app2", 0x100, 0x100),
+                test_app("app3", 0x100, 0x100),
             ],
         );
         let result = generate(&manifest, &test_common(&temp), &test_ld_args());
@@ -742,8 +750,8 @@ mod tests {
             Some(test_binary("rom", 0x200, 0x200)),
             test_binary("kernel", 0x200, 0x200),
             vec![
-                test_binary("app1", 0x100, 0x100),
-                test_binary("app2", 0x100, 0x100),
+                test_app("app1", 0x100, 0x100),
+                test_app("app2", 0x100, 0x100),
             ],
         );
         let result = generate(&manifest, &test_common(&temp), &test_ld_args());
@@ -766,7 +774,7 @@ mod tests {
             test_platform(0x1000, 0x200, 0x200, 0x1000),
             None,
             test_binary("kernel", 0x100, 0x100),
-            vec![test_binary("app1", 0x100, 0x100)],
+            vec![test_app("app1", 0x100, 0x100)],
         );
         let result = generate(&manifest, &test_common(&temp), &test_ld_args());
         assert!(result.is_ok());
@@ -783,7 +791,7 @@ mod tests {
             test_platform(0x1000, 0x1000, 0x1000, 0x1000),
             Some(test_binary("my_rom", 0x100, 0x100)),
             test_binary("my_kernel", 0x100, 0x100),
-            vec![test_binary("my_app", 0x100, 0x100)],
+            vec![test_app("my_app", 0x100, 0x100)],
         );
         let result = generate(&manifest, &test_common(&temp), &test_ld_args());
         assert!(result.is_ok());
@@ -878,7 +886,7 @@ mod tests {
             test_platform(0x1000, 0x200, 0x1000, 0x1000),
             None,
             test_binary("kernel", 0x100, 0x100),
-            vec![test_binary("app1", 0x200, 0x100)], // App needs 0x200, only 0x100 available
+            vec![test_app("app1", 0x200, 0x100)], // App needs 0x200, only 0x100 available
         );
         let result = generate(&manifest, &test_common(&temp), &test_ld_args());
         assert!(result.is_err());
@@ -892,7 +900,7 @@ mod tests {
             test_platform(0x1000, 0x1000, 0x200, 0x1000),
             None,
             test_binary("kernel", 0x100, 0x100),
-            vec![test_binary("app1", 0x100, 0x200)], // App needs 0x200 RAM, only 0x100 available
+            vec![test_app("app1", 0x100, 0x200)], // App needs 0x200 RAM, only 0x100 available
         );
         let result = generate(&manifest, &test_common(&temp), &test_ld_args());
         assert!(result.is_err());
@@ -908,9 +916,9 @@ mod tests {
             None,
             test_binary("kernel", 0x100, 0x100),
             vec![
-                test_binary("app1", 0x100, 0x50),
-                test_binary("app2", 0x100, 0x50),
-                test_binary("app3", 0x100, 0x50), // This one should fail
+                test_app("app1", 0x100, 0x50),
+                test_app("app2", 0x100, 0x50),
+                test_app("app3", 0x100, 0x50), // This one should fail
             ],
         );
         let result = generate(&manifest, &test_common(&temp), &test_ld_args());
@@ -927,9 +935,9 @@ mod tests {
             None,
             test_binary("kernel", 0x100, 0x100),
             vec![
-                test_binary("app1", 0x50, 0x100),
-                test_binary("app2", 0x50, 0x100),
-                test_binary("app3", 0x50, 0x100), // This one should fail
+                test_app("app1", 0x50, 0x100),
+                test_app("app2", 0x50, 0x100),
+                test_app("app3", 0x50, 0x100), // This one should fail
             ],
         );
         let result = generate(&manifest, &test_common(&temp), &test_ld_args());
@@ -946,9 +954,9 @@ mod tests {
             None,
             test_binary("kernel", 0x100, 0x100),
             vec![
-                test_binary("app1", 0x80, 0x50),
-                test_binary("app2", 0x80, 0x50),
-                test_binary("app3", 0x100, 0x50), // Needs 0x100, only 0x80 left
+                test_app("app1", 0x80, 0x50),
+                test_app("app2", 0x80, 0x50),
+                test_app("app3", 0x100, 0x50), // Needs 0x100, only 0x80 left
             ],
         );
         let result = generate(&manifest, &test_common(&temp), &test_ld_args());
@@ -965,9 +973,9 @@ mod tests {
             None,
             test_binary("kernel", 0x100, 0x100),
             vec![
-                test_binary("app1", 0x50, 0x80),
-                test_binary("app2", 0x50, 0x80),
-                test_binary("app3", 0x50, 0x100), // Needs 0x100 RAM, only 0x80 left
+                test_app("app1", 0x50, 0x80),
+                test_app("app2", 0x50, 0x80),
+                test_app("app3", 0x50, 0x100), // Needs 0x100 RAM, only 0x80 left
             ],
         );
         let result = generate(&manifest, &test_common(&temp), &test_ld_args());
