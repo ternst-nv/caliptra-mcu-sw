@@ -166,7 +166,8 @@ impl<'a> LdGeneration<'a> {
 
         // Iterate through each application providing it with the entirety of ITCM and DTCM space.
         let mut app_defs = Vec::new();
-        for binary in &self.manifest.apps {
+        for app in &self.manifest.apps {
+            let binary = &app.binary;
             // This is a sizing build, so the header values don't matter.
             let header = create_tbf_header(binary)?;
 
@@ -282,7 +283,8 @@ impl<'a> LdGeneration<'a> {
         // Now iterate through each application and allocate its ITCM and RAM requirements.
         let mut first_app_instructions = None;
         let mut app_defs = Vec::new();
-        for binary in &self.manifest.apps {
+        for app in &self.manifest.apps {
+            let binary = &app.binary;
             let header = create_tbf_header(binary)?;
 
             let exec_mem = binary.exec_mem()?;
