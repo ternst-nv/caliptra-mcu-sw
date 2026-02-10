@@ -199,6 +199,7 @@ impl<'a, I: InterruptService + 'a> kernel::platform::chip::Chip for VeeR<'a, I> 
 }
 
 fn handle_exception(exception: mcause::Exception) {
+    debug!("We're seeing {:?}: {:#x}", exception, CSR.mtval.get());
     match exception {
         mcause::Exception::UserEnvCall | mcause::Exception::SupervisorEnvCall => (),
 

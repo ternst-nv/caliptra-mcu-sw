@@ -339,14 +339,26 @@ mod test {
         let mut secondary_flash_content = flash_image.clone().to_vec();
         // Pad with zeros until the DOWNLOAD partition offset
         let download_partition_offset = STAGING_PARTITION.offset;
+        eprintln!(
+            "{:#x} | {:#x}",
+            secondary_flash_content.len(),
+            download_partition_offset,
+        );
         if secondary_flash_content.len() < download_partition_offset {
             secondary_flash_content.resize(download_partition_offset, 0);
         }
         // Append the full flash image in the DOWNLOAD partition
         secondary_flash_content.append(&mut flash_image.clone());
 
-        std::fs::write(secondary_flash_image_path.clone(), secondary_flash_content)
+        std::fs::write(secondary_flash_image_path.clone(), &secondary_flash_content)
             .expect("Failed to write secondary flash image");
+
+        eprintln!(
+            "New image: {:#x} | {:#x}",
+            secondary_flash_content.len(),
+            STAGING_PARTITION.size
+        );
+        eprintln!("Image paths: {update_flash_image_path:?} | {secondary_flash_image_path:?}");
 
         new_opts.secondary_flash_image_path = Some(secondary_flash_image_path.clone());
         new_opts

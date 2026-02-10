@@ -350,6 +350,7 @@ mod test {
             runtime_path_str,
             "--i3c-port".to_string(),
             i3c_port.clone(),
+            // "--trace-instr".to_string(),
         ];
 
         // map the memory map to the emulator

@@ -587,6 +587,12 @@ impl<'a, D: DMAMapping> FirmwareUpdater<'a, D> {
             .get_dma_image_staging_address(MCU_RT_IDENTIFIER)
             .await?;
 
+        writeln!(
+            Console::<DefaultSyscalls>::writer(),
+            "[FW Up] Addr {staging_address:#x} Offset {mcu_image_offset:#x} | Len {mcu_image_len:#x}"
+        )
+        .unwrap();
+
         // Copy the firmware image to the MCU DMA staging area
         self.copy_to_memory(staging_address, mcu_image_offset, mcu_image_len)
             .await?;

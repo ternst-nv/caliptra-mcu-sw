@@ -115,6 +115,23 @@ pub async fn image_loading_task() {
 #[allow(unused_variables)]
 async fn image_loading<D: DMAMapping>(dma_mapping: &'static D) -> Result<(), ErrorCode> {
     let mut console_writer = Console::<DefaultSyscalls>::writer();
+    #[cfg(feature = "test-flash-based-boot")]
+    {
+        writeln!(
+            console_writer,
+            "IMAGE_LOADER_APP: Hello flash based boot world!"
+        )
+        .unwrap();
+    }
+
+    #[cfg(feature = "test-firmware-update-flash")]
+    {
+        writeln!(
+            console_writer,
+            "IMAGE_LOADER_APP: Hello firmware update flash world!"
+        )
+        .unwrap();
+    }
     writeln!(console_writer, "IMAGE_LOADER_APP: Hello async world!").unwrap();
     #[cfg(feature = "test-pldm-streaming-boot")]
     {
@@ -144,24 +161,32 @@ async fn image_loading<D: DMAMapping>(dma_mapping: &'static D) -> Result<(), Err
         feature = "test-firmware-update-flash",
     ))]
     {
+        writeln!(console_writer, "IMAGE_LOADER_APP: A!").unwrap();
         let mut boot_config = FlashBootConfig::new();
-        let active_partition_id = boot_config
-            .get_active_partition()
-            .await
-            .map_err(|_| ErrorCode::Fail)?;
+        writeln!(console_writer, "IMAGE_LOADER_APP: B!").unwrap();
+        let active_partition_id = boot_config.get_active_partition().await.map_err(|e| {
+            writeln!(console_writer, "FAILURE : {e:?}").unwrap();
+            ErrorCode::Fail
+        })?;
+        writeln!(console_writer, "IMAGE_LOADER_APP: C!").unwrap();
         let active_partition = boot_config
             .get_partition_from_id(active_partition_id)
             .map_err(|_| ErrorCode::Fail)?;
+        writeln!(console_writer, "IMAGE_LOADER_APP: D!").unwrap();
 
         let active = (active_partition_id, active_partition);
+        writeln!(console_writer, "IMAGE_LOADER_APP: E!").unwrap();
 
         let pending = {
             let pending_partition_id = boot_config.get_pending_partition().await;
+            writeln!(console_writer, "IMAGE_LOADER_APP: F!").unwrap();
             if pending_partition_id.is_ok() {
                 let pending_partition_id = pending_partition_id.unwrap();
+                writeln!(console_writer, "IMAGE_LOADER_APP: G!").unwrap();
                 let pending_partition = boot_config
                     .get_partition_from_id(pending_partition_id)
                     .map_err(|_| ErrorCode::Fail)?;
+                writeln!(console_writer, "IMAGE_LOADER_APP: H!").unwrap();
 
                 Some((pending_partition_id, pending_partition))
             } else {
@@ -175,14 +200,17 @@ async fn image_loading<D: DMAMapping>(dma_mapping: &'static D) -> Result<(), Err
             // No pending partition, use the active one
             active
         };
+        writeln!(console_writer, "IMAGE_LOADER_APP: I!").unwrap();
 
         let flash_syscall = SpiFlash::new(load_partition.1.driver_num);
         let flash_image_loader = FlashImageLoader::new(flash_syscall, dma_mapping);
+        writeln!(console_writer, "IMAGE_LOADER_APP: J!").unwrap();
 
         if let Some(pending) = pending {
             // Set the new Auth Manifest from the pending partition
             flash_image_loader.set_auth_manifest().await?;
         }
+        writeln!(console_writer, "IMAGE_LOADER_APP: K!").unwrap();
 
         flash_image_loader
             .load_and_authorize(config::streaming_boot_consts::IMAGE_ID1)
