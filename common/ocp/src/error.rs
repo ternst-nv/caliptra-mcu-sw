@@ -22,4 +22,8 @@ pub enum OcpError {
     MessageTooShort = 7,
     /// Message slice is longer than the expected command.
     MessageTooLong = 8,
+    /// RECOVERY_CTRL: reserved value in Image Selection field (byte 1).
+    RecoveryCtrlInvalidImageSelection = 9,
+    /// RECOVERY_CTRL: reserved value in Activate field (byte 2).
+    RecoveryCtrlInvalidActivate = 10,
 }
