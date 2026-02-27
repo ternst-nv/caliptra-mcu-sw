@@ -12,4 +12,14 @@ pub enum OcpError {
     ProtCapCImageSupportRequired = 2,
     /// PROT_CAP: recovery_memory_access (bit 5) MUST be set when push_c_image_support (bit 7) is set.
     ProtCapRecoveryMemoryAccessRequired = 3,
+    /// DEVICE_RESET: reserved value in Reset Control field (byte 0).
+    DeviceResetInvalidResetControl = 4,
+    /// DEVICE_RESET: reserved value in Forced Recovery field (byte 1).
+    DeviceResetInvalidForcedRecoveryMode = 5,
+    /// DEVICE_RESET: reserved value in Interface Control field (byte 2).
+    DeviceResetInvalidInterfaceControl = 6,
+    /// Message slice is too short for the expected command.
+    MessageTooShort = 7,
+    /// Message slice is longer than the expected command.
+    MessageTooLong = 8,
 }
