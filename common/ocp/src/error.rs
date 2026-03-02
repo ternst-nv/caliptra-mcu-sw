@@ -30,4 +30,6 @@ pub enum OcpError {
     RecoveryStatusInvalidStatus = 11,
     /// RECOVERY_STATUS: image_index exceeds 4-bit range (0-15).
     RecoveryStatusImageIndexOutOfRange = 12,
+    /// INDIRECT_CTRL: IMO is not 4-byte aligned (bits 1:0 must be zero).
+    IndirectCtrlImoNotAligned = 13,
 }
