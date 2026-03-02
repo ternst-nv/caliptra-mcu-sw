@@ -26,4 +26,8 @@ pub enum OcpError {
     RecoveryCtrlInvalidImageSelection = 9,
     /// RECOVERY_CTRL: reserved value in Activate field (byte 2).
     RecoveryCtrlInvalidActivate = 10,
+    /// RECOVERY_STATUS: reserved value in Device Recovery Status field (byte 0, bits 0-3).
+    RecoveryStatusInvalidStatus = 11,
+    /// RECOVERY_STATUS: image_index exceeds 4-bit range (0-15).
+    RecoveryStatusImageIndexOutOfRange = 12,
 }
