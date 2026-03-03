@@ -52,4 +52,8 @@ pub enum OcpError {
     HwStatusInvalidCompositeTemp = 22,
     /// HW_STATUS: vendor-specific HW status exceeds maximum length of 251 bytes.
     HwStatusVendorStatusTooLong = 23,
+    /// DEVICE_ID: reserved descriptor type value (byte 0).
+    DeviceIdInvalidDescriptorType = 24,
+    /// DEVICE_ID: vendor-specific string exceeds maximum length of 231 bytes.
+    DeviceIdVendorStringTooLong = 25,
 }
