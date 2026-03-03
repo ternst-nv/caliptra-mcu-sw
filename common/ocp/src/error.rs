@@ -48,4 +48,8 @@ pub enum OcpError {
     DeviceStatusHeartbeatOutOfRange = 20,
     /// DEVICE_STATUS: VendorSpecific recovery reason code is not in range 0x80-0xFF.
     DeviceStatusInvalidVendorReasonCode = 21,
+    /// HW_STATUS: reserved or out-of-range composite temperature value.
+    HwStatusInvalidCompositeTemp = 22,
+    /// HW_STATUS: vendor-specific HW status exceeds maximum length of 251 bytes.
+    HwStatusVendorStatusTooLong = 23,
 }
