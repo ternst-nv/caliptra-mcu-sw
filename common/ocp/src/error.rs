@@ -62,3 +62,18 @@ pub enum OcpError {
     /// transport medium specific error code.
     TransportError(u8) = 27,
 }
+
+/// Errors returned by CMS region operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmsError {
+    /// Attempted to write to a read-only region.
+    ReadOnly,
+    /// Attempted to read from a write-only region.
+    WriteOnly,
+    /// Attempted to push into a full FIFO.
+    FifoFull,
+    /// Attempted to pop from an empty FIFO.
+    FifoEmpty,
+    /// Attempted a transaction on a polling region that is not ready.
+    PollingNotReady,
+}
