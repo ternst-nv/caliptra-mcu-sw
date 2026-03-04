@@ -56,4 +56,9 @@ pub enum OcpError {
     DeviceIdInvalidDescriptorType = 24,
     /// DEVICE_ID: vendor-specific string exceeds maximum length of 231 bytes.
     DeviceIdVendorStringTooLong = 25,
+    /// The transport timed out awaiting an operation.
+    TransportTimeout = 26,
+    /// The transport encountered an error within the underlying medium.  The contained value is a
+    /// transport medium specific error code.
+    TransportError(u8) = 27,
 }
