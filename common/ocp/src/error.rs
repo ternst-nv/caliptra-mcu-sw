@@ -61,6 +61,8 @@ pub enum OcpError {
     /// The transport encountered an error within the underlying medium.  The contained value is a
     /// transport medium specific error code.
     TransportError(u8) = 27,
+    /// A CMS region buffer is empty or its length is not a multiple of 4.
+    InvalidCmsBufferSize = 28,
 }
 
 /// Errors returned by CMS region operations.
