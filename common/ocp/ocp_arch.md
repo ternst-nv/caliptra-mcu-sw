@@ -64,25 +64,21 @@ Used with `INDIRECT_CTRL` / `INDIRECT_STATUS` / `INDIRECT_DATA`.
 ```rust
 /// Integrator-provided backing store for a memory-window CMS region.
 ///
-/// Accessed via INDIRECT_CTRL/STATUS/DATA commands. The state machine
-/// manages the IMO (indirect memory offset) externally and passes the
-/// current offset into read/write calls.
+/// Accessed via INDIRECT_CTRL/STATUS/DATA commands. The region owns its
+/// indirect memory offset (IMO) and manages auto-increment, wrap, and
+/// overflow tracking internally. Status metadata (region type, size,
+/// flags, polling) is returned as a complete `IndirectStatus` struct.
 pub trait IndirectCmsRegion {
-    /// Region type reported in INDIRECT_STATUS byte 1 (bits 0-2).
-    /// One of: Code (0b000), Log (0b001), VendorWO (0b100),
-    /// VendorRW (0b101), VendorRO (0b110).
-    fn region_type(&self) -> IndirectRegionType;
-
-    /// Size of the region in 4-byte units (reported in INDIRECT_STATUS bytes 2-5).
-    fn size_4b(&self) -> u32;
-
-    /// Whether this region requires polling (P bit in INDIRECT_STATUS type byte).
-    /// When true, the state machine will check poll_ready() before each
-    /// INDIRECT_DATA transaction.
-    fn polling_required(&self) -> bool;
+    /// Returns the current INDIRECT_STATUS for this region.
+    ///
+    /// The returned `IndirectStatus` contains the status flags (overflow,
+    /// read-only error, polling error, write-only error), region type,
+    /// polling bit, and region size. The state machine serializes this
+    /// directly for INDIRECT_STATUS reads.
+    fn status(&self) -> IndirectStatus;
 
     /// Returns the current indirect memory offset (IMO) in bytes.
-    /// Always 4-byte aligned.
+    /// Always 4-byte aligned. Used when INDIRECT_CTRL is read back.
     fn imo(&self) -> u32;
 
     /// Sets the indirect memory offset (IMO) in bytes.
@@ -94,7 +90,7 @@ pub trait IndirectCmsRegion {
     /// The implementation auto-increments the IMO by the transfer size
     /// rounded up to the next 4-byte boundary. If the IMO exceeds the
     /// region size, it wraps to 0 and the implementation signals overflow.
-    /// Returns an error if the region is read-only.
+    /// Returns an error if the region is read-only or polling is not ready.
     fn write(&mut self, data: &[u8]) -> Result<(), CmsError>;
 
     /// Read up to `buf.len()` bytes starting at the current IMO.
@@ -102,16 +98,8 @@ pub trait IndirectCmsRegion {
     /// rounded up to the next 4-byte boundary. If the IMO exceeds the
     /// region size, it wraps to 0 and the implementation signals overflow.
     /// Returns the number of bytes actually read.
-    /// Returns an error if the region is write-only.
+    /// Returns an error if the region is write-only or polling is not ready.
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, CmsError>;
-
-    /// Returns true if an overflow (IMO wrap) has occurred since the last
-    /// call to clear_status(). Reported in INDIRECT_STATUS bit 0.
-    fn overflow(&self) -> bool;
-
-    /// For polling regions: returns true when the device can accept the
-    /// next transaction. Non-polling regions should always return true.
-    fn poll_ready(&self) -> bool;
 
     /// Clear accumulated status flags (overflow, polling error, access errors).
     /// Called when INDIRECT_STATUS is read (clear-on-read semantics).
@@ -132,26 +120,17 @@ Used with `INDIRECT_FIFO_CTRL` / `INDIRECT_FIFO_STATUS` / `INDIRECT_FIFO_DATA`.
 /// Integrator-provided backing store for a FIFO CMS region.
 ///
 /// Accessed via INDIRECT_FIFO_CTRL/STATUS/DATA commands. The FIFO manages
-/// its own write and read indices internally. The state machine queries
-/// these indices for INDIRECT_FIFO_STATUS and delegates data transfers
-/// to push/pop operations rather than offset-based I/O.
+/// its own write and read indices internally. Status metadata (region type,
+/// empty/full flags, indices, sizes) is returned as a complete
+/// `IndirectFifoStatus` struct.
 pub trait FifoCmsRegion {
-    /// Region type reported in INDIRECT_FIFO_STATUS byte 1 (bits 0-2).
-    /// One of: Code (0b000), Log (0b001), VendorWO (0b100), VendorRO (0b101).
-    fn region_type(&self) -> FifoRegionType;
-
-    /// Current write index in 4-byte units (INDIRECT_FIFO_STATUS bytes 4-7).
-    fn write_index(&self) -> u32;
-
-    /// Current read index in 4-byte units (INDIRECT_FIFO_STATUS bytes 8-11).
-    fn read_index(&self) -> u32;
-
-    /// Total FIFO size in 4-byte units (INDIRECT_FIFO_STATUS bytes 12-15).
-    fn fifo_size_4b(&self) -> u32;
-
-    /// Max transfer size per INDIRECT_FIFO_DATA access in 4-byte units
-    /// (INDIRECT_FIFO_STATUS bytes 16-19).
-    fn max_transfer_size_4b(&self) -> u32;
+    /// Returns the current INDIRECT_FIFO_STATUS for this region.
+    ///
+    /// The returned `IndirectFifoStatus` contains the status flags
+    /// (empty, full), region type, write index, read index, FIFO size,
+    /// and max transfer size. The state machine serializes this directly
+    /// for INDIRECT_FIFO_STATUS reads.
+    fn status(&self) -> IndirectFifoStatus;
 
     /// Push data into the FIFO (write direction).
     /// Returns an error if the FIFO is full (the state machine will NACK)
@@ -161,13 +140,7 @@ pub trait FifoCmsRegion {
     /// Pop data from the FIFO (read direction).
     /// Reads up to `buf.len()` bytes and returns the number actually read.
     /// Returns an error if the FIFO is empty or if the region is write-only.
-    fn pop(&self, buf: &mut [u8]) -> Result<usize, CmsError>;
-
-    /// Returns true if the FIFO is empty (status bit 0).
-    fn is_empty(&self) -> bool;
-
-    /// Returns true if the FIFO is full (status bit 1).
-    fn is_full(&self) -> bool;
+    fn pop(&mut self, buf: &mut [u8]) -> Result<usize, CmsError>;
 
     /// Reset the FIFO: write and read indices return to initial values,
     /// FIFO becomes empty. Called when INDIRECT_FIFO_CTRL byte 1 = 0x01.
@@ -448,11 +421,11 @@ Dispatch logic:
 | `RECOVERY_STATUS` (0x27) | Serialize recovery status + vendor status | Error (read-only) |
 | `HW_STATUS` (0x28) | Build from `VendorHandler` hw_status methods (flags, temp, vendor status) | Error (read-only) |
 | `INDIRECT_CTRL` (0x29) | Serialize current CMS + IMO | Parse `IndirectCtrl`; select CMS; reset IMO |
-| `INDIRECT_STATUS` (0x2A) | Build from selected CMS region metadata; clear status flags | Error (read-only) |
+| `INDIRECT_STATUS` (0x2A) | Call `region.status()` to get `IndirectStatus`; serialize; then `clear_status()` | Error (read-only) |
 | `INDIRECT_DATA` (0x2B) | Read from CMS at current IMO; auto-increment | Write to CMS at current IMO; auto-increment; handle wrap/errors |
 | `VENDOR` (0x2C) | Delegate to `VendorHandler::handle_vendor_read` | Delegate to `VendorHandler::handle_vendor_write` |
 | `INDIRECT_FIFO_CTRL` (0x2D) | Serialize current FIFO CMS + image size | Parse; select FIFO CMS; optionally reset FIFO |
-| `INDIRECT_FIFO_STATUS` (0x2E) | Build from FIFO region metadata | Error (read-only) |
+| `INDIRECT_FIFO_STATUS` (0x2E) | Call `region.status()` to get `IndirectFifoStatus`; serialize | Error (read-only) |
 | `INDIRECT_FIFO_DATA` (0x2F) | Read from FIFO region | Write to FIFO region; NACK on overflow |
 
 ---
@@ -467,13 +440,13 @@ allows region implementations to manage their own addressing, wrapping, and over
 - On each `INDIRECT_DATA` read or write, the region implementation auto-increments its IMO
   by the transfer size rounded up to the next 4-byte boundary.
 - If the IMO exceeds the region size, the implementation wraps to 0 and records overflow
-  internally. The state machine queries `overflow()` when building `INDIRECT_STATUS`.
+  internally. The overflow flag is reported via `status()` in the `IndirectStatus` struct.
 - Changing the CMS in `INDIRECT_CTRL` calls `reset()` on the newly selected region, which
   resets its IMO and clears accumulated status.
 - The state machine reads back the current IMO via `imo()` when `INDIRECT_CTRL` is read.
-- Polling regions: the state machine checks `poll_ready()` before each `INDIRECT_DATA`
-  transaction. If not ready, the transaction is ignored and the polling-error flag is set
-  in `INDIRECT_STATUS`.
+- Polling regions: the region's `write()` / `read()` methods internally check readiness
+  and return `CmsError::PollingNotReady` if not ready, recording the polling-error flag
+  in its status. The state machine reports this via `status()` in `INDIRECT_STATUS`.
 
 ---
 
