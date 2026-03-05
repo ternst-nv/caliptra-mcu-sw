@@ -200,6 +200,27 @@ pub struct RecoveryDeviceConfig<'a> {
     pub minor_version: u8,
     pub max_response_time: u8,
     pub heartbeat_period: u8,
+
+    /// Whether the device supports local c-image recovery (PROT_CAP bit 6).
+    pub local_c_image_support: bool,
+}
+```
+
+### Vendor Capabilities
+
+The integrator reports which optional protocol features the device supports via
+`VendorCapabilities`, a bitfield returned by `VendorHandler::capabilities()`.
+These bits directly populate PROT_CAP bits 1-3 and 8-10:
+
+```rust
+bitfield! {
+    pub struct VendorCapabilities(u8);
+    pub forced_recovery, set_forced_recovery: 0;    // PROT_CAP bit 1
+    pub mgmt_reset, set_mgmt_reset: 1;              // PROT_CAP bit 2
+    pub device_reset, set_device_reset: 2;           // PROT_CAP bit 3
+    pub interface_isolation, set_interface_isolation: 3; // PROT_CAP bit 8
+    pub hardware_status, set_hardware_status: 4;     // PROT_CAP bit 9
+    pub vendor_command, set_vendor_command: 5;        // PROT_CAP bit 10
 }
 ```
 
@@ -209,37 +230,34 @@ The integrator provides a trait implementation for vendor-specific behavior:
 
 ```rust
 pub trait VendorHandler {
+    /// Report which optional protocol capabilities the device supports.
+    fn capabilities(&self) -> VendorCapabilities;
+
+    /// Execute a device reset (called on DEVICE_RESET write with non-zero control).
+    fn execute_reset(&mut self, reset: &DeviceReset);
+
     /// Handle a VENDOR command (cmd=0x2C) write.
-    /// `data` is the raw payload from the write command.
-    /// Returns the response bytes to send back on a subsequent read, or an error.
     fn handle_vendor_write(&mut self, data: &[u8]) -> Result<(), OcpError>;
 
     /// Handle a VENDOR command (cmd=0x2C) read.
-    /// Write the response into `buf` and return the number of bytes written.
     fn handle_vendor_read(&self, buf: &mut [u8]) -> Result<usize, OcpError>;
 
-    /// Called by the state machine when DEVICE_STATUS is being built.
-    /// Allows the integrator to supply the vendor status bytes
-    /// (DEVICE_STATUS bytes 7-254). Write into `buf` and return the
-    /// number of bytes written (0-248).
+    /// Supply vendor status bytes for DEVICE_STATUS (bytes 7-254).
     fn vendor_device_status(&self, buf: &mut [u8]) -> usize;
 
-    /// Called by the state machine when DEVICE_STATUS is being built.
-    /// Returns the current heartbeat counter value (DEVICE_STATUS bytes 4-5).
-    /// The integrator is responsible for maintaining and incrementing this
-    /// counter at the period advertised in PROT_CAP byte 14.
-    /// Value must be in the range 0-4095 (12-bit, wraps).
+    /// Return the current heartbeat counter (DEVICE_STATUS bytes 4-5, 12-bit).
     fn heartbeat(&self) -> u16;
 
-    /// Called by the state machine when HW_STATUS (cmd=0x28) is read.
-    /// Returns the current hardware status snapshot. The state machine
-    /// serializes the returned HwStatus struct into the wire response.
+    /// Return the current HW_STATUS snapshot (cmd=0x28).
     fn hw_status(&self) -> HwStatus;
 }
 ```
 
-A no-op default implementation is provided for integrators that do not need vendor
-extensions or hardware status reporting. The defaults return zero/empty for all methods.
+`NoopVendorHandler` is provided for integrators that do not need vendor extensions.
+It returns `VendorCapabilities(0)` (no optional features), returns zero/empty for
+`vendor_device_status` and `heartbeat`, and panics with `unimplemented!()` for
+methods that should never be called when their corresponding capability is not
+advertised (`execute_reset`, `handle_vendor_write`, `handle_vendor_read`, `hw_status`).
 
 ---
 
@@ -512,6 +530,7 @@ let config = RecoveryDeviceConfig {
     minor_version: 1,
     max_response_time: 17,  // 2^17 us ≈ 131 ms
     heartbeat_period: 0,
+    local_c_image_support: false,
 };
 
 // Instantiate the state machine with transport.
@@ -618,3 +637,26 @@ common/ocp/
 9. **`interface.rs` -- Activation flow** -- `complete_activation()`, multi-stage support.
 10. **`interface.rs` -- Command dispatch** -- `process_command()` with scope checks, error routing.
 11. **Tests** -- Unit tests for each step above (including slice-backed CMS implementations), then integration tests for full recovery flows.
+
+---
+
+## Spec Deviations
+
+### `push_c_image_support` with FIFO-only CMS (deviation from Spec 1.1, Section 9.2)
+
+The OCP Secure Firmware Recovery spec v1.1 states that when `push_c_image_support`
+(PROT_CAP bit 7) is set, `recovery_memory_access` (bit 5) MUST also be set. This
+requirement assumes that push-based recovery is performed exclusively through the
+memory-window (INDIRECT_DATA) path.
+
+However, a device that only provides FIFO CMS regions (`INDIRECT_FIFO_DATA`) is
+equally capable of accepting a pushed recovery image. Requiring
+`recovery_memory_access` in this case would force the device to advertise
+memory-window support it does not have, or prevent it from advertising push
+capability at all.
+
+**Our behavior:** `push_c_image_support` is set whenever any CMS region capable of
+receiving a recovery image exists -- either indirect (memory-window) or FIFO. The
+`validate_capabilities` check in `ProtCap` accepts `push_c_image_support` when
+*either* `recovery_memory_access` or `fifo_cms_support` is set. This is believed
+to be a spec bug that will be corrected in a future revision.
