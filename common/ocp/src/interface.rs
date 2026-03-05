@@ -8,6 +8,7 @@
 
 use crate::cms::{FifoCmsRegion, IndirectCmsRegion};
 use crate::error::OcpError;
+use crate::protocol::device_id;
 use crate::protocol::device_id::DeviceId;
 use crate::protocol::device_reset::{
     DeviceReset, ForcedRecoveryMode, InterfaceControl, ResetControl,
@@ -280,6 +281,16 @@ impl<'a, T: Transport, V: VendorHandler> RecoveryStateMachine<'a, T, V> {
 
     /// Handle a PROT_CAP (cmd=0x22) write: read-only command, set error.
     fn handle_prot_cap_write(&mut self) {
+        self.set_protocol_error(ProtocolError::UnsupportedCommand);
+    }
+
+    /// Handle a DEVICE_ID (cmd=0x23) read: serialize the device identity.
+    fn handle_device_id_read(&self) -> ([u8; device_id::MAX_MESSAGE_LEN], usize) {
+        self.config.device_id.to_message()
+    }
+
+    /// Handle a DEVICE_ID (cmd=0x23) write: read-only command, set error.
+    fn handle_device_id_write(&mut self) {
         self.set_protocol_error(ProtocolError::UnsupportedCommand);
     }
 }
@@ -856,5 +867,42 @@ mod tests {
         );
 
         assert!(matches!(result, Err(OcpError::DuplicateCmsIndex)));
+    }
+
+    // -- DEVICE_ID handler tests --
+
+    #[test]
+    fn device_id_read_returns_serialized_id() {
+        let mut transport = MockTransport::new();
+        let config = test_config();
+        let expected = config.device_id.to_message();
+        let sm = RecoveryStateMachine::new(
+            config,
+            &mut transport,
+            &mut [],
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        let (buf, len) = sm.handle_device_id_read();
+        assert_eq!(len, expected.1);
+        assert_eq!(&buf[..len], &expected.0[..expected.1]);
+    }
+
+    #[test]
+    fn device_id_write_sets_unsupported_command_error() {
+        let mut transport = MockTransport::new();
+        let mut sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut [],
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        sm.handle_device_id_write();
+        assert_eq!(sm.protocol_error, ProtocolError::UnsupportedCommand);
     }
 }
