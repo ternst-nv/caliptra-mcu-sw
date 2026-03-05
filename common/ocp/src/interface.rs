@@ -20,7 +20,8 @@ use crate::protocol::device_status::{
 use crate::protocol::hw_status;
 use crate::protocol::indirect_ctrl::IndirectCtrl;
 use crate::protocol::indirect_fifo_ctrl::IndirectFifoCtrl;
-use crate::protocol::indirect_status::CmsRegionType;
+use crate::protocol::indirect_status;
+use crate::protocol::indirect_status::{CmsRegionType, IndirectStatus, StatusFlags};
 use crate::protocol::prot_cap::{ProtCap, RecoveryProtocolCapabilities, RESPONSE_LEN};
 use crate::protocol::recovery_ctrl::{ActivateRecoveryImage, ImageSelection, RecoveryCtrl};
 use crate::protocol::recovery_status;
@@ -345,6 +346,30 @@ impl<'a, T: Transport, V: VendorHandler> RecoveryStateMachine<'a, T, V> {
 
     /// Handle a HW_STATUS (cmd=0x28) write: read-only command, set error.
     fn handle_hw_status_write(&mut self) {
+        self.set_protocol_error(ProtocolError::UnsupportedCommand);
+    }
+
+    /// Handle an INDIRECT_STATUS (cmd=0x2A) read.
+    ///
+    /// Looks up the memory-window CMS region selected by `indirect_ctrl.cms`.
+    /// If found, returns its status and clears accumulated flags (clear-on-read).
+    /// If the index doesn't match any indirect region (including FIFO-only
+    /// indices), returns `CmsRegionType::Unsupported`.
+    fn handle_indirect_status_read(&mut self) -> [u8; indirect_status::MESSAGE_LEN] {
+        let cms = self.indirect_ctrl.cms;
+        match self.lookup_indirect_region(cms) {
+            Some(region) => {
+                let status = region.status();
+                region.clear_status();
+                status.to_message()
+            }
+            None => IndirectStatus::new(StatusFlags(0), CmsRegionType::Unsupported, false, 0)
+                .to_message(),
+        }
+    }
+
+    /// Handle an INDIRECT_STATUS (cmd=0x2A) write: read-only command, set error.
+    fn handle_indirect_status_write(&mut self) {
         self.set_protocol_error(ProtocolError::UnsupportedCommand);
     }
 }
@@ -1140,6 +1165,119 @@ mod tests {
         .unwrap();
 
         sm.handle_hw_status_write();
+        assert_eq!(sm.protocol_error, ProtocolError::UnsupportedCommand);
+    }
+
+    // -- INDIRECT_STATUS handler tests --
+
+    #[test]
+    fn indirect_status_read_returns_region_type_and_size() {
+        let mut buf = [0u8; 64];
+        let mut region = SliceIndirectRegion::new(&mut buf, CmsRegionType::CodeSpace).unwrap();
+        let mut regions: [(u8, &mut dyn IndirectCmsRegion); 1] = [(0, &mut region)];
+
+        let mut transport = MockTransport::new();
+        let mut sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut regions,
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        let msg = sm.handle_indirect_status_read();
+        let status = IndirectStatus::new(StatusFlags(0), CmsRegionType::CodeSpace, false, 64);
+        assert_eq!(msg, status.to_message());
+    }
+
+    #[test]
+    fn indirect_status_read_unsupported_for_invalid_index() {
+        let mut buf = [0u8; 64];
+        let mut region = SliceIndirectRegion::new(&mut buf, CmsRegionType::CodeSpace).unwrap();
+        let mut regions: [(u8, &mut dyn IndirectCmsRegion); 1] = [(0, &mut region)];
+
+        let mut transport = MockTransport::new();
+        let mut sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut regions,
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        sm.indirect_ctrl.cms = 99;
+        let msg = sm.handle_indirect_status_read();
+        let expected =
+            IndirectStatus::new(StatusFlags(0), CmsRegionType::Unsupported, false, 0).to_message();
+        assert_eq!(msg, expected);
+    }
+
+    #[test]
+    fn indirect_status_read_unsupported_for_fifo_index() {
+        let mut ibuf = [0u8; 64];
+        let mut fbuf = [0u8; 64];
+        let mut ir = SliceIndirectRegion::new(&mut ibuf, CmsRegionType::CodeSpace).unwrap();
+        let mut fr = SliceFifoRegion::new(&mut fbuf, FifoCmsRegionType::CodeSpace, 16).unwrap();
+        let mut indirect: [(u8, &mut dyn IndirectCmsRegion); 1] = [(0, &mut ir)];
+        let mut fifo: [(u8, &mut dyn FifoCmsRegion); 1] = [(1, &mut fr)];
+
+        let mut transport = MockTransport::new();
+        let mut sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut indirect,
+            &mut fifo,
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        sm.indirect_ctrl.cms = 1;
+        let msg = sm.handle_indirect_status_read();
+        let expected =
+            IndirectStatus::new(StatusFlags(0), CmsRegionType::Unsupported, false, 0).to_message();
+        assert_eq!(msg, expected);
+    }
+
+    #[test]
+    fn indirect_status_read_overflow_reported_and_cleared() {
+        let mut buf = [0u8; 4];
+        let mut region = SliceIndirectRegion::new(&mut buf, CmsRegionType::CodeSpace).unwrap();
+        region.write(&[0xAA; 4]).unwrap();
+
+        let mut regions: [(u8, &mut dyn IndirectCmsRegion); 1] = [(0, &mut region)];
+
+        let mut transport = MockTransport::new();
+        let mut sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut regions,
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        let msg = sm.handle_indirect_status_read();
+        assert_eq!(msg[0] & 0x01, 0x01, "overflow flag should be set");
+
+        let msg2 = sm.handle_indirect_status_read();
+        assert_eq!(msg2[0] & 0x01, 0x00, "overflow flag should be cleared");
+    }
+
+    #[test]
+    fn indirect_status_write_sets_unsupported_command_error() {
+        let mut transport = MockTransport::new();
+        let mut sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut [],
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        sm.handle_indirect_status_write();
         assert_eq!(sm.protocol_error, ProtocolError::UnsupportedCommand);
     }
 }
