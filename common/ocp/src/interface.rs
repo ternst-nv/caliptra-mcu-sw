@@ -13,7 +13,10 @@ use crate::protocol::device_id::DeviceId;
 use crate::protocol::device_reset::{
     DeviceReset, ForcedRecoveryMode, InterfaceControl, ResetControl,
 };
-use crate::protocol::device_status::{DeviceStatusValue, ProtocolError, RecoveryReasonCode};
+use crate::protocol::device_status;
+use crate::protocol::device_status::{
+    DeviceStatus, DeviceStatusValue, ProtocolError, RecoveryReasonCode,
+};
 use crate::protocol::indirect_ctrl::IndirectCtrl;
 use crate::protocol::indirect_fifo_ctrl::IndirectFifoCtrl;
 use crate::protocol::indirect_status::CmsRegionType;
@@ -293,6 +296,35 @@ impl<'a, T: Transport, V: VendorHandler> RecoveryStateMachine<'a, T, V> {
     fn handle_device_id_write(&mut self) {
         self.set_protocol_error(ProtocolError::UnsupportedCommand);
     }
+
+    /// Handle a DEVICE_STATUS (cmd=0x24) read: assemble dynamic fields and serialize.
+    ///
+    /// Protocol error is clear-on-read: the current value is included in the
+    /// response, then reset to `NoError`.
+    fn handle_device_status_read(
+        &mut self,
+    ) -> Result<([u8; device_status::MAX_MESSAGE_LEN], usize), OcpError> {
+        let heartbeat = self.vendor.heartbeat();
+        let mut vendor_buf = [0u8; device_status::MAX_VENDOR_STATUS_LEN];
+        let vendor_len = self.vendor.vendor_device_status(&mut vendor_buf);
+
+        let status = DeviceStatus::new(
+            self.device_status_value,
+            self.protocol_error,
+            self.recovery_reason,
+            heartbeat,
+            &vendor_buf[..vendor_len],
+        )?;
+
+        let result = status.to_message();
+        self.protocol_error = ProtocolError::NoError;
+        Ok(result)
+    }
+
+    /// Handle a DEVICE_STATUS (cmd=0x24) write: read-only command, set error.
+    fn handle_device_status_write(&mut self) {
+        self.set_protocol_error(ProtocolError::UnsupportedCommand);
+    }
 }
 
 #[cfg(test)]
@@ -314,18 +346,24 @@ mod tests {
 
     struct MockVendorHandler {
         caps: VendorCapabilities,
+        heartbeat_val: u16,
+        vendor_status_data: Vec<u8>,
     }
 
     impl MockVendorHandler {
         fn new() -> Self {
             Self {
                 caps: VendorCapabilities(0),
+                heartbeat_val: 0,
+                vendor_status_data: Vec::new(),
             }
         }
 
         fn with_all_caps() -> Self {
             Self {
                 caps: VendorCapabilities(0b0011_1111),
+                heartbeat_val: 0,
+                vendor_status_data: Vec::new(),
             }
         }
     }
@@ -345,12 +383,14 @@ mod tests {
             Ok(0)
         }
 
-        fn vendor_device_status(&self, _buf: &mut [u8]) -> usize {
-            0
+        fn vendor_device_status(&self, buf: &mut [u8]) -> usize {
+            let len = self.vendor_status_data.len();
+            buf[..len].copy_from_slice(&self.vendor_status_data);
+            len
         }
 
         fn heartbeat(&self) -> u16 {
-            0
+            self.heartbeat_val
         }
 
         fn hw_status(&self) -> HwStatus<'_> {
@@ -903,6 +943,92 @@ mod tests {
         .unwrap();
 
         sm.handle_device_id_write();
+        assert_eq!(sm.protocol_error, ProtocolError::UnsupportedCommand);
+    }
+
+    // -- DEVICE_STATUS handler tests --
+
+    #[test]
+    fn device_status_read_returns_default_status() {
+        let mut transport = MockTransport::new();
+        let mut sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut [],
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        let (msg, len) = sm.handle_device_status_read().unwrap();
+        assert_eq!(len, 7);
+        assert_eq!(msg[0], DeviceStatusValue::StatusPending as u8);
+        assert_eq!(msg[1], ProtocolError::NoError as u8);
+        assert_eq!(u16::from_le_bytes([msg[2], msg[3]]), 0x00); // NoBootFailure
+        assert_eq!(u16::from_le_bytes([msg[4], msg[5]]), 0); // heartbeat
+        assert_eq!(msg[6], 0); // vendor status length
+    }
+
+    #[test]
+    fn device_status_read_clears_protocol_error() {
+        let mut transport = MockTransport::new();
+        let mut sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut [],
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        sm.set_protocol_error(ProtocolError::UnsupportedCommand);
+
+        let (msg, _) = sm.handle_device_status_read().unwrap();
+        assert_eq!(msg[1], ProtocolError::UnsupportedCommand as u8);
+        assert_eq!(sm.protocol_error, ProtocolError::NoError);
+    }
+
+    #[test]
+    fn device_status_read_includes_vendor_status() {
+        let mut transport = MockTransport::new();
+        let mut vendor = MockVendorHandler::new();
+        vendor.vendor_status_data = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let mut sm =
+            RecoveryStateMachine::new(test_config(), &mut transport, &mut [], &mut [], vendor)
+                .unwrap();
+
+        let (msg, len) = sm.handle_device_status_read().unwrap();
+        assert_eq!(len, 11); // 7 + 4 vendor bytes
+        assert_eq!(msg[6], 4);
+        assert_eq!(&msg[7..11], &[0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn device_status_read_heartbeat_from_vendor() {
+        let mut transport = MockTransport::new();
+        let mut vendor = MockVendorHandler::new();
+        vendor.heartbeat_val = 42;
+        let mut sm =
+            RecoveryStateMachine::new(test_config(), &mut transport, &mut [], &mut [], vendor)
+                .unwrap();
+
+        let (msg, _) = sm.handle_device_status_read().unwrap();
+        assert_eq!(u16::from_le_bytes([msg[4], msg[5]]), 42);
+    }
+
+    #[test]
+    fn device_status_write_sets_unsupported_command_error() {
+        let mut transport = MockTransport::new();
+        let mut sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut [],
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        sm.handle_device_status_write();
         assert_eq!(sm.protocol_error, ProtocolError::UnsupportedCommand);
     }
 }
