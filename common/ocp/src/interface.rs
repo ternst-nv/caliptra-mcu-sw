@@ -22,6 +22,7 @@ use crate::protocol::indirect_fifo_ctrl::IndirectFifoCtrl;
 use crate::protocol::indirect_status::CmsRegionType;
 use crate::protocol::prot_cap::{ProtCap, RecoveryProtocolCapabilities, RESPONSE_LEN};
 use crate::protocol::recovery_ctrl::{ActivateRecoveryImage, ImageSelection, RecoveryCtrl};
+use crate::protocol::recovery_status;
 use crate::protocol::recovery_status::{DeviceRecoveryStatus, RecoveryStatus};
 use crate::transport::{Timeout, Transport};
 use crate::vendor::VendorHandler;
@@ -323,6 +324,16 @@ impl<'a, T: Transport, V: VendorHandler> RecoveryStateMachine<'a, T, V> {
 
     /// Handle a DEVICE_STATUS (cmd=0x24) write: read-only command, set error.
     fn handle_device_status_write(&mut self) {
+        self.set_protocol_error(ProtocolError::UnsupportedCommand);
+    }
+
+    /// Handle a RECOVERY_STATUS (cmd=0x27) read: serialize stored recovery status.
+    fn handle_recovery_status_read(&self) -> [u8; recovery_status::MESSAGE_LEN] {
+        self.recovery_status.to_message()
+    }
+
+    /// Handle a RECOVERY_STATUS (cmd=0x27) write: read-only command, set error.
+    fn handle_recovery_status_write(&mut self) {
         self.set_protocol_error(ProtocolError::UnsupportedCommand);
     }
 }
@@ -1029,6 +1040,44 @@ mod tests {
         .unwrap();
 
         sm.handle_device_status_write();
+        assert_eq!(sm.protocol_error, ProtocolError::UnsupportedCommand);
+    }
+
+    // -- RECOVERY_STATUS handler tests --
+
+    #[test]
+    fn recovery_status_read_returns_default() {
+        let mut transport = MockTransport::new();
+        let sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut [],
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        let msg = sm.handle_recovery_status_read();
+        assert_eq!(msg.len(), 2);
+        let byte0 = recovery_status::RecoveryStatusByte0(msg[0]);
+        assert_eq!(byte0.status(), DeviceRecoveryStatus::NotInRecovery as u8);
+        assert_eq!(byte0.image_index(), 0);
+        assert_eq!(msg[1], 0); // vendor status
+    }
+
+    #[test]
+    fn recovery_status_write_sets_unsupported_command_error() {
+        let mut transport = MockTransport::new();
+        let mut sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut [],
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        sm.handle_recovery_status_write();
         assert_eq!(sm.protocol_error, ProtocolError::UnsupportedCommand);
     }
 }
