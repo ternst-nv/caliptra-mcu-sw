@@ -94,7 +94,12 @@ impl ProtCap {
         if !caps.local_c_image_support() && !caps.push_c_image_support() {
             return Err(OcpError::ProtCapCImageSupportRequired);
         }
-        if caps.push_c_image_support() && !caps.recovery_memory_access() {
+        // Spec 1.1 requires recovery_memory_access when push_c_image_support
+        // is set, but this is a spec bug: FIFO-based push is equally valid.
+        // We accept push_c_image_support when either recovery_memory_access
+        // or fifo_cms_support is set.
+        if caps.push_c_image_support() && !caps.recovery_memory_access() && !caps.fifo_cms_support()
+        {
             return Err(OcpError::ProtCapRecoveryMemoryAccessRequired);
         }
 
@@ -206,6 +211,16 @@ mod tests {
             prot_cap.to_message(),
             Err(OcpError::ProtCapRecoveryMemoryAccessRequired)
         );
+    }
+
+    #[test]
+    fn push_c_image_with_fifo_cms_accepted() {
+        let mut caps = mandatory_caps();
+        caps.set_recovery_memory_access(false);
+        caps.set_fifo_cms_support(true);
+
+        let prot_cap = ProtCap::new(0x01, 0x01, caps, 1, 17, 0);
+        assert!(prot_cap.to_message().is_ok());
     }
 
     #[test]
