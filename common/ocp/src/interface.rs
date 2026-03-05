@@ -15,6 +15,8 @@ use crate::protocol::device_reset::{
 use crate::protocol::device_status::{DeviceStatusValue, ProtocolError, RecoveryReasonCode};
 use crate::protocol::indirect_ctrl::IndirectCtrl;
 use crate::protocol::indirect_fifo_ctrl::IndirectFifoCtrl;
+use crate::protocol::indirect_status::CmsRegionType;
+use crate::protocol::prot_cap::{ProtCap, RecoveryProtocolCapabilities, RESPONSE_LEN};
 use crate::protocol::recovery_ctrl::{ActivateRecoveryImage, ImageSelection, RecoveryCtrl};
 use crate::protocol::recovery_status::{DeviceRecoveryStatus, RecoveryStatus};
 use crate::transport::{Timeout, Transport};
@@ -41,6 +43,10 @@ pub struct RecoveryDeviceConfig<'a> {
     /// PROT_CAP heartbeat period exponent (byte 14).
     /// 0 means heartbeat is not supported.
     pub heartbeat_period: u8,
+
+    /// Whether the device supports local c-image recovery (PROT_CAP bit 6).
+    /// Set to `true` if the device can recover from a locally stored image.
+    pub local_c_image_support: bool,
 }
 
 /// Actions the integrator must handle after `process_command` returns.
@@ -67,6 +73,9 @@ pub enum RecoveryAction {
 /// Recovery spec v1.1. The state machine owns the transport and handles
 /// receive/send internally, exposing `process_command()` as the single
 /// entry point for the integrator's main loop.
+// TODO: Remove when process_command dispatches to handlers (Phase 5+),
+// which will read all fields from non-test code.
+#[allow(dead_code)]
 pub struct RecoveryStateMachine<'a, T: Transport, V: VendorHandler> {
     pub(crate) transport: &'a mut T,
 
@@ -88,10 +97,14 @@ pub struct RecoveryStateMachine<'a, T: Transport, V: VendorHandler> {
 
     pub(crate) indirect_regions: &'a mut [(u8, &'a mut dyn IndirectCmsRegion)],
     pub(crate) fifo_regions: &'a mut [(u8, &'a mut dyn FifoCmsRegion)],
+    pub(crate) cms_count: u8,
 
     pub(crate) vendor: V,
 }
 
+// TODO: Remove when process_command dispatches to handlers (Phase 5+),
+// which will call all private methods from non-test code.
+#[allow(dead_code)]
 impl<'a, T: Transport, V: VendorHandler> RecoveryStateMachine<'a, T, V> {
     /// Construct a new state machine with spec-defined defaults.
     ///
@@ -104,15 +117,47 @@ impl<'a, T: Transport, V: VendorHandler> RecoveryStateMachine<'a, T, V> {
         indirect_regions: &'a mut [(u8, &'a mut dyn IndirectCmsRegion)],
         fifo_regions: &'a mut [(u8, &'a mut dyn FifoCmsRegion)],
         vendor: V,
-    ) -> Self {
-        // SAFETY: RecoveryStatus::new with status=NotInRecovery and
-        // image_index=0 always succeeds (0 is within the 4-bit range).
-        let recovery_status = match RecoveryStatus::new(DeviceRecoveryStatus::NotInRecovery, 0, 0) {
-            Ok(s) => s,
-            Err(_) => unreachable!(),
-        };
+    ) -> Result<Self, OcpError> {
+        let recovery_status = RecoveryStatus::new(DeviceRecoveryStatus::NotInRecovery, 0, 0)?;
 
-        Self {
+        if !indirect_regions.is_empty() {
+            let has_cms0_code = indirect_regions.iter().any(|(idx, r)| {
+                *idx == 0 && r.status().cms_region_type() == CmsRegionType::CodeSpace
+            });
+            if !has_cms0_code {
+                return Err(OcpError::IndirectCms0NotCodeSpace);
+            }
+        }
+
+        // Verify no CMS index appears more than once across both slices.
+        // Note: CMS regions are likely to be few, so this operation is not prohibetively expensive.
+        for (i, (idx_a, _)) in indirect_regions.iter().enumerate() {
+            for (idx_b, _) in indirect_regions[i + 1..].iter() {
+                if idx_a == idx_b {
+                    return Err(OcpError::DuplicateCmsIndex);
+                }
+            }
+            for (idx_b, _) in fifo_regions.iter() {
+                if idx_a == idx_b {
+                    return Err(OcpError::DuplicateCmsIndex);
+                }
+            }
+        }
+        for (i, (idx_a, _)) in fifo_regions.iter().enumerate() {
+            for (idx_b, _) in fifo_regions[i + 1..].iter() {
+                if idx_a == idx_b {
+                    return Err(OcpError::DuplicateCmsIndex);
+                }
+            }
+        }
+
+        let indirect_count = indirect_regions.len();
+        let fifo_count = fifo_regions.len();
+        let cms_count: u8 = (indirect_count + fifo_count)
+            .try_into()
+            .map_err(|_| OcpError::InvalidCmdBufferCount)?;
+
+        Ok(Self {
             transport,
             recovery_status,
             recovery_ctrl: RecoveryCtrl::new(
@@ -127,6 +172,7 @@ impl<'a, T: Transport, V: VendorHandler> RecoveryStateMachine<'a, T, V> {
             ),
             indirect_ctrl: IndirectCtrl { cms: 0, imo: 0 },
             indirect_fifo_ctrl: IndirectFifoCtrl::new(0, false, 0),
+            cms_count,
             device_status_value: DeviceStatusValue::StatusPending,
             protocol_error: ProtocolError::NoError,
             recovery_reason: RecoveryReasonCode::NoBootFailure,
@@ -134,7 +180,7 @@ impl<'a, T: Transport, V: VendorHandler> RecoveryStateMachine<'a, T, V> {
             indirect_regions,
             fifo_regions,
             vendor,
-        }
+        })
     }
 
     /// Block for the next command on the transport, process it, send any
@@ -178,6 +224,64 @@ impl<'a, T: Transport, V: VendorHandler> RecoveryStateMachine<'a, T, V> {
     fn set_protocol_error(&mut self, err: ProtocolError) {
         self.protocol_error = err;
     }
+
+    /// Build the PROT_CAP capabilities bitfield from the current region
+    /// configuration and vendor-reported capabilities.
+    ///
+    /// Identification and device_status are always set. CMS 0 is guaranteed
+    /// to be CodeSpace when indirect regions are present (enforced by `new()`),
+    /// so push_c_image_support and recovery_memory_access are set together
+    /// whenever indirect regions exist. Bits 1-3 and 8-10 are populated from
+    /// `VendorHandler::capabilities()`.
+    fn build_capabilities(&self) -> RecoveryProtocolCapabilities {
+        let mut caps = RecoveryProtocolCapabilities(0);
+        let vendor_caps = self.vendor.capabilities();
+
+        caps.set_identification(true);
+        caps.set_device_status(true);
+        caps.set_local_c_image_support(self.config.local_c_image_support);
+
+        caps.set_forced_recovery(vendor_caps.forced_recovery());
+        caps.set_mgmt_reset(vendor_caps.mgmt_reset());
+        caps.set_device_reset(vendor_caps.device_reset());
+        caps.set_interface_isolation(vendor_caps.interface_isolation());
+        caps.set_hardware_status(vendor_caps.hardware_status());
+        caps.set_vendor_command(vendor_caps.vendor_command());
+
+        if !self.indirect_regions.is_empty() {
+            caps.set_push_c_image_support(true);
+            caps.set_recovery_memory_access(true);
+        }
+
+        if !self.fifo_regions.is_empty() {
+            // NOTE: This is a deviation from the 1.1 SPEC.  There is currently a bug in the spec
+            // where it requires indirect region if push is set, instead of being indirect region
+            // and/or indirect fifo.
+            caps.set_push_c_image_support(true);
+            caps.set_fifo_cms_support(true);
+        }
+
+        caps
+    }
+
+    /// Handle a PROT_CAP (cmd=0x22) read: build and serialize the response.
+    fn handle_prot_cap_read(&self) -> Result<[u8; RESPONSE_LEN], OcpError> {
+        let caps = self.build_capabilities();
+        let prot_cap = ProtCap::new(
+            self.config.major_version,
+            self.config.minor_version,
+            caps,
+            self.cms_count,
+            self.config.max_response_time,
+            self.config.heartbeat_period,
+        );
+        prot_cap.to_message()
+    }
+
+    /// Handle a PROT_CAP (cmd=0x22) write: read-only command, set error.
+    fn handle_prot_cap_write(&mut self) {
+        self.set_protocol_error(ProtocolError::UnsupportedCommand);
+    }
 }
 
 #[cfg(test)]
@@ -190,9 +294,61 @@ mod tests {
     use crate::cms::slice_fifo::SliceFifoRegion;
     use crate::cms::slice_indirect::SliceIndirectRegion;
     use crate::protocol::device_id::{DeviceDescriptor, PciVendorDescriptor};
+    use crate::protocol::device_reset::DeviceReset;
+    use crate::protocol::hw_status::{CompositeTemperature, HwStatus, HwStatusFlags};
     use crate::protocol::indirect_fifo_status::FifoCmsRegionType;
     use crate::protocol::indirect_status::CmsRegionType;
-    use crate::vendor::NoopVendorHandler;
+    use crate::protocol::prot_cap;
+    use crate::vendor::VendorCapabilities;
+
+    struct MockVendorHandler {
+        caps: VendorCapabilities,
+    }
+
+    impl MockVendorHandler {
+        fn new() -> Self {
+            Self {
+                caps: VendorCapabilities(0),
+            }
+        }
+
+        fn with_all_caps() -> Self {
+            Self {
+                caps: VendorCapabilities(0b0011_1111),
+            }
+        }
+    }
+
+    impl crate::vendor::VendorHandler for MockVendorHandler {
+        fn capabilities(&self) -> VendorCapabilities {
+            self.caps
+        }
+
+        fn execute_reset(&mut self, _reset: &DeviceReset) {}
+
+        fn handle_vendor_write(&mut self, _data: &[u8]) -> Result<(), OcpError> {
+            Ok(())
+        }
+
+        fn handle_vendor_read(&self, _buf: &mut [u8]) -> Result<usize, OcpError> {
+            Ok(0)
+        }
+
+        fn vendor_device_status(&self, _buf: &mut [u8]) -> usize {
+            0
+        }
+
+        fn heartbeat(&self) -> u16 {
+            0
+        }
+
+        fn hw_status(&self) -> HwStatus<'_> {
+            match HwStatus::new(HwStatusFlags(0), 0, CompositeTemperature::NoData, &[]) {
+                Ok(s) => s,
+                Err(_) => unreachable!(),
+            }
+        }
+    }
 
     struct MockTransport {
         recv_data: Vec<Vec<u8>>,
@@ -245,6 +401,7 @@ mod tests {
             minor_version: 1,
             max_response_time: 17,
             heartbeat_period: 0,
+            local_c_image_support: true,
         }
     }
 
@@ -256,8 +413,9 @@ mod tests {
             &mut transport,
             &mut [],
             &mut [],
-            NoopVendorHandler,
-        );
+            MockVendorHandler::new(),
+        )
+        .unwrap();
 
         assert_eq!(sm.device_status_value, DeviceStatusValue::StatusPending);
         assert_eq!(sm.protocol_error, ProtocolError::NoError);
@@ -292,6 +450,8 @@ mod tests {
         assert_eq!(sm.indirect_fifo_ctrl.cms, 0);
         assert!(!sm.indirect_fifo_ctrl.reset);
         assert_eq!(sm.indirect_fifo_ctrl.image_size, 0);
+
+        assert_eq!(sm.cms_count, 0);
     }
 
     #[test]
@@ -303,8 +463,9 @@ mod tests {
             &mut transport,
             &mut [],
             &mut [],
-            NoopVendorHandler,
-        );
+            MockVendorHandler::new(),
+        )
+        .unwrap();
 
         let action = sm.process_command(Timeout::Never).unwrap();
         assert_eq!(action, RecoveryAction::None);
@@ -318,8 +479,9 @@ mod tests {
             &mut transport,
             &mut [],
             &mut [],
-            NoopVendorHandler,
-        );
+            MockVendorHandler::new(),
+        )
+        .unwrap();
 
         let err = sm.process_command(Timeout::Never).unwrap_err();
         assert_eq!(err, OcpError::TransportTimeout);
@@ -327,9 +489,11 @@ mod tests {
 
     #[test]
     fn lookup_indirect_region_finds_match() {
-        let mut buf = [0u8; 64];
-        let mut region = SliceIndirectRegion::new(&mut buf, CmsRegionType::CodeSpace).unwrap();
-        let mut regions: [(u8, &mut dyn IndirectCmsRegion); 1] = [(3, &mut region)];
+        let mut buf0 = [0u8; 64];
+        let mut buf3 = [0u8; 64];
+        let mut r0 = SliceIndirectRegion::new(&mut buf0, CmsRegionType::CodeSpace).unwrap();
+        let mut r3 = SliceIndirectRegion::new(&mut buf3, CmsRegionType::Log).unwrap();
+        let mut regions: [(u8, &mut dyn IndirectCmsRegion); 2] = [(0, &mut r0), (3, &mut r3)];
 
         let mut transport = MockTransport::new();
         let mut sm = RecoveryStateMachine::new(
@@ -337,11 +501,13 @@ mod tests {
             &mut transport,
             &mut regions,
             &mut [],
-            NoopVendorHandler,
-        );
+            MockVendorHandler::new(),
+        )
+        .unwrap();
 
+        assert!(sm.lookup_indirect_region(0).is_some());
         assert!(sm.lookup_indirect_region(3).is_some());
-        assert!(sm.lookup_indirect_region(0).is_none());
+        assert!(sm.lookup_indirect_region(1).is_none());
         assert!(sm.lookup_indirect_region(255).is_none());
     }
 
@@ -357,8 +523,9 @@ mod tests {
             &mut transport,
             &mut [],
             &mut regions,
-            NoopVendorHandler,
-        );
+            MockVendorHandler::new(),
+        )
+        .unwrap();
 
         assert!(sm.lookup_fifo_region(5).is_some());
         assert!(sm.lookup_fifo_region(0).is_none());
@@ -373,11 +540,321 @@ mod tests {
             &mut transport,
             &mut [],
             &mut [],
-            NoopVendorHandler,
-        );
+            MockVendorHandler::new(),
+        )
+        .unwrap();
 
         assert_eq!(sm.protocol_error, ProtocolError::NoError);
         sm.set_protocol_error(ProtocolError::UnsupportedCommand);
         assert_eq!(sm.protocol_error, ProtocolError::UnsupportedCommand);
+    }
+
+    // -- PROT_CAP handler tests --
+
+    #[test]
+    fn prot_cap_read_returns_magic_version_and_config() {
+        let mut transport = MockTransport::new();
+        let sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut [],
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        let msg = sm.handle_prot_cap_read().unwrap();
+        assert_eq!(&msg[0..8], &prot_cap::MAGIC);
+        assert_eq!(msg[8], 1); // major
+        assert_eq!(msg[9], 1); // minor
+        assert_eq!(msg[13], 17); // max_response_time
+        assert_eq!(msg[14], 0); // heartbeat_period
+    }
+
+    #[test]
+    fn prot_cap_read_no_regions_reports_local_c_image() {
+        let mut transport = MockTransport::new();
+        let sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut [],
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        let msg = sm.handle_prot_cap_read().unwrap();
+        let caps_raw = u16::from_le_bytes([msg[10], msg[11]]);
+        let caps = RecoveryProtocolCapabilities(caps_raw);
+
+        assert!(caps.identification());
+        assert!(caps.device_status());
+        assert!(caps.local_c_image_support());
+        assert!(!caps.push_c_image_support());
+        assert!(!caps.recovery_memory_access());
+        assert!(!caps.fifo_cms_support());
+        assert_eq!(msg[12], 0);
+    }
+
+    #[test]
+    fn prot_cap_read_with_indirect_code_sets_push_and_memory_access() {
+        let mut buf = [0u8; 64];
+        let mut region = SliceIndirectRegion::new(&mut buf, CmsRegionType::CodeSpace).unwrap();
+        let mut regions: [(u8, &mut dyn IndirectCmsRegion); 1] = [(0, &mut region)];
+
+        let mut transport = MockTransport::new();
+        let sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut regions,
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        let msg = sm.handle_prot_cap_read().unwrap();
+        let caps_raw = u16::from_le_bytes([msg[10], msg[11]]);
+        let caps = RecoveryProtocolCapabilities(caps_raw);
+
+        assert!(caps.push_c_image_support());
+        assert!(caps.recovery_memory_access());
+        assert!(!caps.fifo_cms_support());
+        assert_eq!(msg[12], 1);
+    }
+
+    #[test]
+    fn prot_cap_read_with_fifo_only_sets_push_and_fifo() {
+        let mut buf = [0u8; 64];
+        let mut region = SliceFifoRegion::new(&mut buf, FifoCmsRegionType::CodeSpace, 16).unwrap();
+        let mut regions: [(u8, &mut dyn FifoCmsRegion); 1] = [(2, &mut region)];
+
+        let mut transport = MockTransport::new();
+        let sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut [],
+            &mut regions,
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        let msg = sm.handle_prot_cap_read().unwrap();
+        let caps_raw = u16::from_le_bytes([msg[10], msg[11]]);
+        let caps = RecoveryProtocolCapabilities(caps_raw);
+
+        // Spec 1.1 deviation: push_c_image_support is set for FIFO-only
+        // configurations even without recovery_memory_access.
+        assert!(caps.push_c_image_support());
+        assert!(caps.fifo_cms_support());
+        assert!(!caps.recovery_memory_access());
+        assert_eq!(msg[12], 1);
+    }
+
+    #[test]
+    fn prot_cap_read_cms_count_is_total_regions() {
+        let mut buf0 = [0u8; 64];
+        let mut buf1 = [0u8; 64];
+        let mut r0 = SliceIndirectRegion::new(&mut buf0, CmsRegionType::CodeSpace).unwrap();
+        let mut r1 = SliceIndirectRegion::new(&mut buf1, CmsRegionType::Log).unwrap();
+        let mut regions: [(u8, &mut dyn IndirectCmsRegion); 2] = [(0, &mut r0), (7, &mut r1)];
+
+        let mut transport = MockTransport::new();
+        let sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut regions,
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        let msg = sm.handle_prot_cap_read().unwrap();
+        assert_eq!(msg[12], 2); // 2 regions total (indices are not contiguous)
+    }
+
+    #[test]
+    fn prot_cap_read_cms_count_spans_indirect_and_fifo() {
+        let mut ibuf = [0u8; 64];
+        let mut fbuf = [0u8; 64];
+        let mut ir = SliceIndirectRegion::new(&mut ibuf, CmsRegionType::CodeSpace).unwrap();
+        let mut fr = SliceFifoRegion::new(&mut fbuf, FifoCmsRegionType::CodeSpace, 16).unwrap();
+        let mut indirect: [(u8, &mut dyn IndirectCmsRegion); 1] = [(0, &mut ir)];
+        let mut fifo: [(u8, &mut dyn FifoCmsRegion); 1] = [(1, &mut fr)];
+
+        let mut transport = MockTransport::new();
+        let sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut indirect,
+            &mut fifo,
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        let msg = sm.handle_prot_cap_read().unwrap();
+        assert_eq!(msg[12], 2); // 1 indirect + 1 fifo = 2
+    }
+
+    #[test]
+    fn new_rejects_indirect_without_cms0_code() {
+        let mut buf = [0u8; 64];
+        let mut region = SliceIndirectRegion::new(&mut buf, CmsRegionType::Log).unwrap();
+        let mut regions: [(u8, &mut dyn IndirectCmsRegion); 1] = [(0, &mut region)];
+
+        let mut transport = MockTransport::new();
+        let result = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut regions,
+            &mut [],
+            MockVendorHandler::new(),
+        );
+
+        assert!(matches!(result, Err(OcpError::IndirectCms0NotCodeSpace)));
+    }
+
+    #[test]
+    fn new_rejects_indirect_missing_cms0() {
+        let mut buf = [0u8; 64];
+        let mut region = SliceIndirectRegion::new(&mut buf, CmsRegionType::CodeSpace).unwrap();
+        let mut regions: [(u8, &mut dyn IndirectCmsRegion); 1] = [(1, &mut region)];
+
+        let mut transport = MockTransport::new();
+        let result = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut regions,
+            &mut [],
+            MockVendorHandler::new(),
+        );
+
+        assert!(matches!(result, Err(OcpError::IndirectCms0NotCodeSpace)));
+    }
+
+    #[test]
+    fn prot_cap_write_sets_unsupported_command_error() {
+        let mut transport = MockTransport::new();
+        let mut sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut [],
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        sm.handle_prot_cap_write();
+        assert_eq!(sm.protocol_error, ProtocolError::UnsupportedCommand);
+    }
+
+    #[test]
+    fn prot_cap_read_vendor_caps_all_set() {
+        let mut transport = MockTransport::new();
+        let sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut [],
+            &mut [],
+            MockVendorHandler::with_all_caps(),
+        )
+        .unwrap();
+
+        let msg = sm.handle_prot_cap_read().unwrap();
+        let caps_raw = u16::from_le_bytes([msg[10], msg[11]]);
+        let caps = RecoveryProtocolCapabilities(caps_raw);
+
+        assert!(caps.forced_recovery());
+        assert!(caps.mgmt_reset());
+        assert!(caps.device_reset());
+        assert!(caps.interface_isolation());
+        assert!(caps.hardware_status());
+        assert!(caps.vendor_command());
+    }
+
+    #[test]
+    fn prot_cap_read_vendor_caps_none_set() {
+        let mut transport = MockTransport::new();
+        let sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut [],
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        let msg = sm.handle_prot_cap_read().unwrap();
+        let caps_raw = u16::from_le_bytes([msg[10], msg[11]]);
+        let caps = RecoveryProtocolCapabilities(caps_raw);
+
+        assert!(!caps.forced_recovery());
+        assert!(!caps.mgmt_reset());
+        assert!(!caps.device_reset());
+        assert!(!caps.interface_isolation());
+        assert!(!caps.hardware_status());
+        assert!(!caps.vendor_command());
+    }
+
+    // -- Duplicate CMS index tests --
+
+    #[test]
+    fn new_rejects_duplicate_indirect_indices() {
+        let mut buf0 = [0u8; 64];
+        let mut buf1 = [0u8; 64];
+        let mut r0 = SliceIndirectRegion::new(&mut buf0, CmsRegionType::CodeSpace).unwrap();
+        let mut r1 = SliceIndirectRegion::new(&mut buf1, CmsRegionType::Log).unwrap();
+        let mut regions: [(u8, &mut dyn IndirectCmsRegion); 2] = [(0, &mut r0), (0, &mut r1)];
+
+        let mut transport = MockTransport::new();
+        let result = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut regions,
+            &mut [],
+            MockVendorHandler::new(),
+        );
+
+        assert!(matches!(result, Err(OcpError::DuplicateCmsIndex)));
+    }
+
+    #[test]
+    fn new_rejects_duplicate_fifo_indices() {
+        let mut buf0 = [0u8; 64];
+        let mut buf1 = [0u8; 64];
+        let mut r0 = SliceFifoRegion::new(&mut buf0, FifoCmsRegionType::CodeSpace, 16).unwrap();
+        let mut r1 = SliceFifoRegion::new(&mut buf1, FifoCmsRegionType::Log, 16).unwrap();
+        let mut regions: [(u8, &mut dyn FifoCmsRegion); 2] = [(2, &mut r0), (2, &mut r1)];
+
+        let mut transport = MockTransport::new();
+        let result = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut [],
+            &mut regions,
+            MockVendorHandler::new(),
+        );
+
+        assert!(matches!(result, Err(OcpError::DuplicateCmsIndex)));
+    }
+
+    #[test]
+    fn new_rejects_overlapping_indirect_and_fifo_index() {
+        let mut ibuf = [0u8; 64];
+        let mut fbuf = [0u8; 64];
+        let mut ir = SliceIndirectRegion::new(&mut ibuf, CmsRegionType::CodeSpace).unwrap();
+        let mut fr = SliceFifoRegion::new(&mut fbuf, FifoCmsRegionType::CodeSpace, 16).unwrap();
+        let mut indirect: [(u8, &mut dyn IndirectCmsRegion); 1] = [(0, &mut ir)];
+        let mut fifo: [(u8, &mut dyn FifoCmsRegion); 1] = [(0, &mut fr)];
+
+        let mut transport = MockTransport::new();
+        let result = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut indirect,
+            &mut fifo,
+            MockVendorHandler::new(),
+        );
+
+        assert!(matches!(result, Err(OcpError::DuplicateCmsIndex)));
     }
 }

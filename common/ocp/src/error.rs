@@ -63,6 +63,12 @@ pub enum OcpError {
     TransportError(u8) = 27,
     /// A CMS region buffer is empty or its length is not a multiple of 4.
     InvalidCmsBufferSize = 28,
+    /// The number of CMS regions provided exceeds the number supported by the OCP Protocol.
+    InvalidCmdBufferCount = 29,
+    /// When indirect regions are provided, CMS index 0 must be a CodeSpace region.
+    IndirectCms0NotCodeSpace = 30,
+    /// Two or more CMS regions share the same index.
+    DuplicateCmsIndex = 31,
 }
 
 /// Errors returned by CMS region operations.
