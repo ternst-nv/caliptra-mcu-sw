@@ -595,6 +595,7 @@ common/ocp/
 │   ├── cms/
 │   │   ├── slice_indirect.rs  (NEW: slice-backed IndirectCmsRegion implementation)
 │   │   └── slice_fifo.rs      (NEW: slice-backed FifoCmsRegion implementation)
+│   ├── vendor.rs           (NEW: VendorHandler trait, NoopVendorHandler)
 │   └── interface.rs        (NEW: RecoveryStateMachine, command dispatch, state transitions)
 └── tests/                  (NEW: integration tests)
     ├── activation.rs       (activation flow: single/multi-stage, success/failure)
