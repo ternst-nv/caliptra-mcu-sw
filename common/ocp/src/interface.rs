@@ -17,6 +17,7 @@ use crate::protocol::device_status;
 use crate::protocol::device_status::{
     DeviceStatus, DeviceStatusValue, ProtocolError, RecoveryReasonCode,
 };
+use crate::protocol::hw_status;
 use crate::protocol::indirect_ctrl::IndirectCtrl;
 use crate::protocol::indirect_fifo_ctrl::IndirectFifoCtrl;
 use crate::protocol::indirect_status::CmsRegionType;
@@ -336,6 +337,16 @@ impl<'a, T: Transport, V: VendorHandler> RecoveryStateMachine<'a, T, V> {
     fn handle_recovery_status_write(&mut self) {
         self.set_protocol_error(ProtocolError::UnsupportedCommand);
     }
+
+    /// Handle a HW_STATUS (cmd=0x28) read: delegate to vendor and serialize.
+    fn handle_hw_status_read(&self) -> ([u8; hw_status::MAX_MESSAGE_LEN], usize) {
+        self.vendor.hw_status().to_message()
+    }
+
+    /// Handle a HW_STATUS (cmd=0x28) write: read-only command, set error.
+    fn handle_hw_status_write(&mut self) {
+        self.set_protocol_error(ProtocolError::UnsupportedCommand);
+    }
 }
 
 #[cfg(test)]
@@ -359,6 +370,10 @@ mod tests {
         caps: VendorCapabilities,
         heartbeat_val: u16,
         vendor_status_data: Vec<u8>,
+        hw_flags: HwStatusFlags,
+        hw_vendor_status_byte: u8,
+        hw_composite_temp: CompositeTemperature,
+        hw_vendor_specific: Vec<u8>,
     }
 
     impl MockVendorHandler {
@@ -367,14 +382,17 @@ mod tests {
                 caps: VendorCapabilities(0),
                 heartbeat_val: 0,
                 vendor_status_data: Vec::new(),
+                hw_flags: HwStatusFlags(0),
+                hw_vendor_status_byte: 0,
+                hw_composite_temp: CompositeTemperature::NoData,
+                hw_vendor_specific: Vec::new(),
             }
         }
 
         fn with_all_caps() -> Self {
             Self {
                 caps: VendorCapabilities(0b0011_1111),
-                heartbeat_val: 0,
-                vendor_status_data: Vec::new(),
+                ..Self::new()
             }
         }
     }
@@ -405,10 +423,13 @@ mod tests {
         }
 
         fn hw_status(&self) -> HwStatus<'_> {
-            match HwStatus::new(HwStatusFlags(0), 0, CompositeTemperature::NoData, &[]) {
-                Ok(s) => s,
-                Err(_) => unreachable!(),
-            }
+            HwStatus::new(
+                self.hw_flags,
+                self.hw_vendor_status_byte,
+                self.hw_composite_temp,
+                &self.hw_vendor_specific,
+            )
+            .expect("MockVendorHandler: hw_status fields are valid")
         }
     }
 
@@ -1078,6 +1099,47 @@ mod tests {
         .unwrap();
 
         sm.handle_recovery_status_write();
+        assert_eq!(sm.protocol_error, ProtocolError::UnsupportedCommand);
+    }
+
+    // -- HW_STATUS handler tests --
+
+    #[test]
+    fn hw_status_read_returns_vendor_hw_status() {
+        let mut transport = MockTransport::new();
+        let mut vendor = MockVendorHandler::new();
+        let mut flags = HwStatusFlags(0);
+        flags.set_temp_critical(true);
+        vendor.hw_flags = flags;
+        vendor.hw_vendor_status_byte = 0xAB;
+        vendor.hw_composite_temp = CompositeTemperature::Celsius(42);
+        vendor.hw_vendor_specific = vec![0x01, 0x02, 0x03];
+
+        let sm = RecoveryStateMachine::new(test_config(), &mut transport, &mut [], &mut [], vendor)
+            .unwrap();
+
+        let (msg, len) = sm.handle_hw_status_read();
+        assert_eq!(len, 7); // 4 header + 3 vendor specific
+        assert_eq!(msg[0], 0x01); // temp_critical flag
+        assert_eq!(msg[1], 0xAB); // vendor hw status byte
+        assert_eq!(msg[2], 42); // composite temp 42°C
+        assert_eq!(msg[3], 3); // vendor specific length
+        assert_eq!(&msg[4..7], &[0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn hw_status_write_sets_unsupported_command_error() {
+        let mut transport = MockTransport::new();
+        let mut sm = RecoveryStateMachine::new(
+            test_config(),
+            &mut transport,
+            &mut [],
+            &mut [],
+            MockVendorHandler::new(),
+        )
+        .unwrap();
+
+        sm.handle_hw_status_write();
         assert_eq!(sm.protocol_error, ProtocolError::UnsupportedCommand);
     }
 }
