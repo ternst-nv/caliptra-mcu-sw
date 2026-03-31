@@ -383,6 +383,11 @@ impl McuError {
             "Firmware manifest DOT command processing error"
         ),
         (
+            ROM_SLICE_COPY_ERROR,
+            0x1_0019,
+            "Source and destination slices size mismatch"
+        ),
+        (
             GENERIC_EXCEPTION,
             0xF_0000,
             "Machine level exception was encountered during ROM execution"

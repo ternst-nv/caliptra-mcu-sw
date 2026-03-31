@@ -16,6 +16,7 @@ Abstract:
 
 use crate::boot_status::McuRomBootStatus;
 use crate::mailbox;
+use crate::rom_copy_from_slice;
 #[cfg(feature = "ocp-lock")]
 use crate::HekState;
 use crate::{
@@ -354,7 +355,7 @@ impl ColdBoot {
     fn cm_import_aes_key(soc_manager: &mut CaliptraSoC) -> Cmk {
         let mut input = [0u8; 64]; // MAX_KEY_SIZE = 64
         match input.get_mut(..32) {
-            Some(dst) => dst.copy_from_slice(&MCU_TEST_AES_KEY),
+            Some(dst) => rom_copy_from_slice(dst, &MCU_TEST_AES_KEY),
             None => fatal_error(McuError::ROM_COLD_BOOT_ENCRYPTED_FW_DECRYPT_START_ERROR),
         }
 
@@ -388,7 +389,7 @@ impl ColdBoot {
         // Extract CMK from response: hdr(8) + cmk(128)
         let mut cmk_bytes = [0u8; CMK_SIZE_BYTES];
         match resp_buf.get(8..8 + CMK_SIZE_BYTES) {
-            Some(src) => cmk_bytes.copy_from_slice(src),
+            Some(src) => rom_copy_from_slice(&mut cmk_bytes, src),
             None => fatal_error(McuError::ROM_COLD_BOOT_ENCRYPTED_FW_DECRYPT_START_ERROR),
         }
         Cmk(cmk_bytes)
@@ -495,7 +496,7 @@ impl ColdBoot {
         };
         let mut sha384 = [0u8; 48];
         match resp_buf.get(12..60) {
-            Some(src) => sha384.copy_from_slice(src),
+            Some(src) => rom_copy_from_slice(&mut sha384, src),
             None => {
                 romtime::println!("[mcu-rom] GET_MCU_FW_SIZE response missing sha384");
                 fatal_error(McuError::ROM_COLD_BOOT_ENCRYPTED_FW_ACTIVATE_FINISH_ERROR);

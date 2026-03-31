@@ -32,7 +32,15 @@ where
         return Err(());
     }
 
-    dest.copy_from_slice(src);
+    // SAFETY: This replicates the copy_from_slice functionality within rust:
+    // https://doc.rust-lang.org/src/core/slice/mod.rs.html#5364, without the
+    // possibility of triggering a panic.
+    //
+    // The src and dest are guaranteed to be non-overlapping by dest being a
+    // mutable reference.  The above check verifies they have the same lenght.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src.as_ptr(), dest.as_mut_ptr(), dest.len());
+    }
     Ok(())
 }
 
@@ -42,8 +50,8 @@ mod tests {
 
     #[test]
     fn equal_length_copies_successfully() {
-        let src = [1u8, 2, 3, 4];
-        let mut dest = [0u8; 4];
+        let src = [1u8; 200];
+        let mut dest = [0u8; 200];
         assert_eq!(checked_copy_from_slice(&mut dest, &src), Ok(()));
         assert_eq!(dest, src);
     }

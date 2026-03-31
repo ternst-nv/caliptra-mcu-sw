@@ -12,7 +12,7 @@ Abstract:
 
 --*/
 
-use crate::{err_code, fatal_error};
+use crate::{err_code, fatal_error, rom_copy_from_slice};
 use caliptra_api::mailbox::{
     CmShaFinalResp, CmShaInitResp, CommandId, CMB_SHA_CONTEXT_SIZE, MAX_CMB_DATA_SIZE,
 };
@@ -118,7 +118,7 @@ fn cm_sha_init(soc_manager: &mut CaliptraSoC, chunk: &[u32]) -> [u8; CMB_SHA_CON
 
     let mut sha_context = [0u8; CMB_SHA_CONTEXT_SIZE];
     match resp_buf.get(8..8 + CMB_SHA_CONTEXT_SIZE) {
-        Some(src) => sha_context.copy_from_slice(src),
+        Some(src) => rom_copy_from_slice(&mut sha_context, src),
         None => fatal_error(McuError::ROM_COLD_BOOT_ROM_DIGEST_MISMATCH),
     }
     sha_context
@@ -168,7 +168,7 @@ fn cm_sha_update(
     }
 
     match resp_buf.get(8..8 + CMB_SHA_CONTEXT_SIZE) {
-        Some(src) => sha_context.copy_from_slice(src),
+        Some(src) => rom_copy_from_slice(sha_context, src),
         None => fatal_error(McuError::ROM_COLD_BOOT_ROM_DIGEST_MISMATCH),
     }
 }
@@ -219,7 +219,7 @@ fn cm_sha_final(
     // CmShaFinalResp: hdr(8) + data_len(4) + hash(64)
     let mut digest = [0u8; 48];
     match resp_buf.get(12..12 + 48) {
-        Some(src) => digest.copy_from_slice(src),
+        Some(src) => rom_copy_from_slice(&mut digest, src),
         None => fatal_error(McuError::ROM_COLD_BOOT_ROM_DIGEST_MISMATCH),
     }
     digest

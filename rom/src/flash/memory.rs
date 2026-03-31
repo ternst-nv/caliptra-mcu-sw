@@ -2,7 +2,10 @@
 
 //! Simple flash storage implementation using memory. Useful for testing and emulation.
 
-use crate::hil::{FlashDrvError, FlashStorage};
+use crate::{
+    hil::{FlashDrvError, FlashStorage},
+    rom_copy_from_slice,
+};
 use core::{cell::Cell, result::Result};
 
 pub struct SimpleFlash {
@@ -23,18 +26,8 @@ impl FlashStorage for SimpleFlash {
     fn read(&self, buffer: &mut [u8], address: usize) -> Result<(), FlashDrvError> {
         let mem = self.memory.take();
         let result = match mem.get(address..address + buffer.len()) {
-            Some(slice) if buffer.len() == slice.len() => {
-                // SAFETY: This is the same as copy_from_slice, but for some reason
-                // the Rust compiler is not optimizing out the panic if the lengths
-                // match, even though the lengths always match.
-                // Possibly a compiler bug?
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        slice.as_ptr(),
-                        buffer.as_mut_ptr(),
-                        buffer.len(),
-                    );
-                }
+            Some(slice) => {
+                rom_copy_from_slice(buffer, slice);
                 Ok(())
             }
             _ => Err(FlashDrvError::INVAL),
@@ -47,13 +40,8 @@ impl FlashStorage for SimpleFlash {
     fn write(&self, buffer: &[u8], address: usize) -> Result<(), FlashDrvError> {
         let mem = self.memory.take();
         let result = match mem.get_mut(address..address + buffer.len()) {
-            Some(slice) if slice.len() == buffer.len() => {
-                // Same technique as read() above – iterate instead of
-                // copy_from_slice to avoid pulling in a panic path that
-                // the compiler cannot optimise away.
-                for (d, s) in slice.iter_mut().zip(buffer.iter()) {
-                    *d = *s;
-                }
+            Some(slice) => {
+                rom_copy_from_slice(slice, buffer);
                 Ok(())
             }
             _ => Err(FlashDrvError::INVAL),

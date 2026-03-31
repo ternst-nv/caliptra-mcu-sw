@@ -46,6 +46,7 @@ mod fw_hitless_update;
 pub use fw_hitless_update::FwHitlessUpdate;
 
 use caliptra_api::CaliptraApiError;
+use checked_copy::checked_copy_from_slice;
 
 pub trait FatalErrorHandler {
     fn fatal_error(&mut self, code: u32) -> !;
@@ -136,5 +137,17 @@ pub fn err_code(err: &CaliptraApiError) -> u32 {
     match err {
         CaliptraApiError::MailboxCmdFailed(c) => *c,
         _ => 0xdead_ffff,
+    }
+}
+
+/// A utility function, which results in a fatal error if the copy is called over slices with
+/// different sizes.
+#[inline(always)]
+pub fn rom_copy_from_slice<T>(dest: &mut [T], src: &[T])
+where
+    T: Copy,
+{
+    if checked_copy_from_slice(dest, src).is_err() {
+        fatal_error(mcu_error::McuError::ROM_SLICE_COPY_ERROR)
     }
 }
